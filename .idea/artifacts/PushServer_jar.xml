@@ -1,0 +1,8 @@
+<component name="ArtifactManager">
+  <artifact type="jar" name="PushServer:jar">
+    <output-path>$PROJECT_DIR$/out/artifacts/PushServer_jar</output-path>
+    <root id="archive" name="PushServer.jar">
+      <element id="module-output" name="PushServer" />
+    </root>
+  </artifact>
+</component>
