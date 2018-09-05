@@ -2,11 +2,14 @@ package shxhzhxx;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
-import java.net.SocketAddress;
 import java.net.StandardSocketOptions;
 import java.nio.ByteBuffer;
-import java.nio.channels.*;
-import java.util.*;
+import java.nio.channels.SelectionKey;
+import java.nio.channels.Selector;
+import java.nio.channels.ServerSocketChannel;
+import java.nio.channels.SocketChannel;
+import java.util.HashMap;
+import java.util.Map;
 
 public class PushServer {
     public static void main(String[] args) {
@@ -51,7 +54,6 @@ public class PushServer {
             return;
         }
         log("init success");
-        test();
 
         for (; ; ) {
             try {
@@ -99,7 +101,7 @@ public class PushServer {
                     Attachment at = (Attachment) key.attachment();
                     if (at.byteBuffer.position() < 4) {
                         at.byteBuffer.limit(4);
-                        if (at.read() < 0) {
+                        if (!at.read()) {
                             log("broken pipe");
                             //broken pipe
                             continue;
@@ -119,7 +121,7 @@ public class PushServer {
                         continue;
                     }
                     at.byteBuffer.limit(len);
-                    if (at.read() < 0) {
+                    if (!at.read()) {
                         log("broken pipe");
                         //broken pipe
                         continue;
@@ -133,6 +135,15 @@ public class PushServer {
                             if (at.id > 0)
                                 map.remove(at.id);
                             at.close();
+                            break;
+                        case 0://echo
+                            if (len > 5) {
+                                at.byteBuffer.position(5);
+                                if (!at.write(at.byteBuffer)) {
+                                    //broken pipe
+                                    log("broken pipe");
+                                }
+                            }
                             break;
                         case 1://bind
                             if (at.id != 0) {//already bind
@@ -168,10 +179,9 @@ public class PushServer {
                                 if (target != null) {
                                     at.byteBuffer.putInt(5, len - 5);
                                     at.byteBuffer.position(5);
-                                    if (at.byteBuffer.remaining() != target.write(at.byteBuffer)) {
+                                    if (!target.write(at.byteBuffer)) {
                                         //broken pipe
                                         log("broken pipe");
-                                        target.close();
                                     }
                                 }
                                 at.byteBuffer.clear();
@@ -200,10 +210,9 @@ public class PushServer {
                                         Attachment target = map.get(at.byteBuffer.getInt(9 + 4 * i));
                                         if (target != null) {
                                             buff.position(0);
-                                            if (buff.remaining() != target.write(buff)) {
+                                            if (!target.write(buff)) {
                                                 //broken pipe
                                                 log("broken pipe");
-                                                target.close();
                                             }
                                         }
                                     }
@@ -227,27 +236,37 @@ public class PushServer {
             this.channel = channel;
         }
 
-        private int read() {
+        private boolean read() {
             int len;
             try {
                 len = channel.read(byteBuffer);
             } catch (IOException e) {
                 len = -1;
             }
-            if (len < 0) {
-                if (id > 0)
-                    map.remove(id);
-                close();
+            if (len >= 0) {
+                return true;
             }
-            return len;
+            if (id > 0)
+                map.remove(id);
+            close();
+            return false;
         }
 
-        private int write(ByteBuffer src) {
+        private boolean write(ByteBuffer src) {
+            int remaining = src.remaining();
+            int len;
             try {
-                return channel.write(src);
+                len = channel.write(src);
             } catch (IOException e) {
-                return -1;
+                len = -1;
             }
+            if (remaining == len) {
+                return true;
+            }
+            if (id > 0)
+                map.remove(id);
+            close();
+            return false;
         }
 
         private void close() {
@@ -264,228 +283,264 @@ public class PushServer {
 
 
     //==============================================================================================================
-    private int testLimit = 5000;
-    private int recvCount = 0;
-    private int pushCount = 0;
-    private Map<Integer, Integer> idPendMsg = new HashMap<>();
-    private Map<Integer, Set<TestAttachment>> idAts = new HashMap<>();
-    private List<TestAttachment> writableSet = new ArrayList<>();
-    private Set<TestAttachment> pendingSet = new HashSet<>();
-
-
-    private void test() {
-        new Thread(() -> {
-            recvCount = 0;
-            pushCount = 0;
-            idPendMsg.clear();
-            writableSet.clear();
-            pendingSet.clear();
-            idAts.clear();
-            SocketAddress serverAddress = new InetSocketAddress("192.168.0.119", 3889);
-            Selector selector;
-            try {
-                selector = Selector.open();
-            } catch (IOException e) {
-                e.printStackTrace();
-                return;
-            }
-
-            for (; ; ) {
-                SocketChannel channel;
-                try {
-                    if (writableSet.size() + pendingSet.size() < testLimit * Math.random()) {
-                        channel = SocketChannel.open();
-                        channel.configureBlocking(false);
-                        channel.connect(serverAddress);
-
-                        TestAttachment at = new TestAttachment(channel);
-                        pendingSet.add(at);
-                        channel.register(selector, SelectionKey.OP_CONNECT, at);
-                    }
-                    selector.select();
-                } catch (IOException e) {
-                    e.printStackTrace();
-                    return;
-                }
-
-                Set<SelectionKey> keySet = selector.selectedKeys();
-                for (SelectionKey key : keySet) {
-                    if (!key.isValid())
-                        continue;
-                    TestAttachment at = (TestAttachment) key.attachment();
-                    if (key.isConnectable()) {
-                        try {
-                            at.channel.finishConnect();
-                        } catch (IOException e) {
-                            log("connect failed");
-                            pendingSet.remove(at);
-                            continue;
-                        }
-                        key.interestOps(SelectionKey.OP_WRITE);
-                    } else if (key.isWritable()) {
-                        //connect success
-                        pendingSet.remove(at);
-                        writableSet.add(at);
-                        key.interestOps(SelectionKey.OP_READ);
-                    } else if (key.isReadable()) {
-                        at.readable();
-                    }
-                    if (!writableSet.isEmpty() && keySet.size() < Math.random() * testLimit) {
-                        writableSet.get((int) (Math.random() * writableSet.size())).writable();
-                    }
-                }
-                keySet.clear();
-                if (Math.random() < 0.01) {
-                    log("pendingSet: " + pendingSet.size());
-                    log("idAts: " + idAts.size());
-                    int duplicate = 0;
-                    for (Set<TestAttachment> set : idAts.values()) {
-                        if (set.size() > 1)
-                            ++duplicate;
-                    }
-                    log("duplicate: " + duplicate);
-
-                    int pendMsg = 0;
-                    for (Integer msgs : idPendMsg.values()) {
-                        pendMsg += msgs;
-                    }
-                    log("pendMsg: " + pendMsg);
-                    log("recvCount: " + recvCount);
-                    log("pushCount: " + pushCount);
-                }
-            }
-        }).start();
-    }
-
-    private class TestAttachment {
-        int id = 0;
-        ByteBuffer writeBuffer = ByteBuffer.allocate(MAX_MESSAGE_SIZE);
-        ByteBuffer readBuffer = ByteBuffer.allocate(MAX_MESSAGE_SIZE);
-        byte[] buff = new byte[MAX_MESSAGE_SIZE];
-        SocketChannel channel;
-
-        private TestAttachment(SocketChannel channel) {
-            this.channel = channel;
-        }
-
-        private int bind(int id) {
-            this.id = id;
-            writeBuffer.putInt(0, 9);
-            writeBuffer.put(4, (byte) 1);
-            writeBuffer.putInt(5, id);
-            writeBuffer.position(0);
-            writeBuffer.limit(9);
-            try {
-                return channel.write(writeBuffer);
-            } catch (IOException | NotYetConnectedException e) {
-                e.printStackTrace();
-                return -1;
-            }
-        }
-
-        private void readable() {
-            try {
-                String r = read();
-                if (r == null)
-                    return;
-                if (r.equals("shxhzhxx")) {
-                    idPendMsg.put(id, idPendMsg.get(id) - 1);
-                    //read success
-                    ++recvCount;
-                } else {
-                    log("read wrong data");
-                    //read failed
-                }
-            } catch (IOException e) {
-                //read failed
-                checkDuplicate("read");
-            }
-        }
-
-        private void writable() {
-            if (id == 0 && Math.random() * testLimit > idAts.size()) {//bind
-                while (id == 0 || idAts.containsKey(id)) {
-                    id = (int) (testLimit * Math.random());
-                }
-                if (bind(id) != 9) {
-                    log("send bind failed");
-                    return;
-                }
-                Set<TestAttachment> set = idAts.computeIfAbsent(id, k -> new HashSet<>());
-                set.add(this);
-            } else {//push
-                byte[] data = "shxhzhxx".getBytes();
-                int targetId = 0;
-                while (targetId == 0 && !writableSet.isEmpty()) {//这里有可能死循环
-                    targetId = writableSet.get((int) (Math.random() * writableSet.size())).id;
-                }
-                if (singlePush(targetId, data) != data.length + 9) {
-                    //push failed
-                    checkDuplicate("write");
-                } else {
-                    ++pushCount;
-                    idPendMsg.merge(targetId, 1, (a, b) -> a + b);
-                }
-            }
-        }
-
-        private void checkDuplicate(String from) {
-            Set<TestAttachment> set = idAts.get(id);
-            if (set == null || !set.contains(this)) {
-                log(from + " broken pipe: " + id);
-            } else {
-                set.remove(this);
-                writableSet.remove(this);
-                try {
-                    channel.close();
-                } catch (IOException e1) {
-                    e1.printStackTrace();
-                }
-            }
-        }
-
-        private String read() throws IOException {
-            if (readBuffer.position() < 4) {
-                readBuffer.limit(4);
-                if (channel.read(readBuffer) < 0)
-                    throw new IOException();
-                if (readBuffer.position() < 4) {
-                    //wait more data
-                    return null;
-                }
-            }
-            int len = readBuffer.getInt(0);
-            readBuffer.limit(len);
-            if (readBuffer.hasRemaining()) {
-                if (channel.read(readBuffer) < 0)
-                    throw new IOException();
-                if (readBuffer.hasRemaining()) {
-                    //wait more data.
-                    return null;
-                }
-            }
-            readBuffer.position(4);
-            readBuffer.get(buff, 0, len - 4);
-            readBuffer.clear();
-            return new String(buff, 0, len - 4);
-        }
-
-        private int singlePush(int id, byte[] data) {
-            int len = 9 + data.length;
-            if (len > MAX_MESSAGE_SIZE)
-                return -1;
-            writeBuffer.limit(len);
-            writeBuffer.position(0);
-            writeBuffer.putInt(len);
-            writeBuffer.put((byte) 2);
-            writeBuffer.putInt(id);
-            writeBuffer.put(data);
-            writeBuffer.position(0);
-            try {
-                return channel.write(writeBuffer);
-            } catch (IOException e) {
-                return -1;
-            }
-        }
-    }
+//    private final boolean DUPLICATE_ID = false;
+//    private final int TEST_LIMIT = 5000;
+//    private int pushCount = 0;
+//    private int recvSuccess = 0;
+//    private int recvWrong = 0;
+//    private Map<Integer, Stack<TestAttachment>> idAts = new HashMap<>();
+//    private List<TestAttachment> writableSet = new ArrayList<>();
+//    private Set<TestAttachment> pendingSet = new HashSet<>();
+//
+//
+//    private void test() {
+//        new Thread(() -> {
+//            recvSuccess = 0;
+//            pushCount = 0;
+//            recvWrong = 0;
+//            writableSet.clear();
+//            pendingSet.clear();
+//            idAts.clear();
+//            report();
+//            SocketAddress serverAddress = new InetSocketAddress("192.168.0.119", 3889);
+//            Selector selector;
+//            try {
+//                selector = Selector.open();
+//            } catch (IOException e) {
+//                e.printStackTrace();
+//                return;
+//            }
+//
+//            for (; ; ) {
+//                SocketChannel channel;
+//                try {
+//                    if (writableSet.size() + pendingSet.size() < TEST_LIMIT * Math.random()) {
+//                        channel = SocketChannel.open();
+//                        channel.socket().setReuseAddress(true);
+//                        channel.configureBlocking(false);
+//                        channel.connect(serverAddress);
+//
+//                        TestAttachment at = new TestAttachment(channel);
+//                        synchronized (PushServer.this) {
+//                            pendingSet.add(at);
+//                        }
+//                        channel.register(selector, SelectionKey.OP_CONNECT, at);
+//                    }
+//                    selector.select();
+//                } catch (IOException e) {
+//                    e.printStackTrace();
+//                    return;
+//                }
+//
+//                synchronized (PushServer.this) {
+//                    Set<SelectionKey> keySet = selector.selectedKeys();
+//                    for (SelectionKey key : keySet) {
+//                        if (!key.isValid()) {
+//                            continue;
+//                        }
+//                        TestAttachment at = (TestAttachment) key.attachment();
+//                        if (key.isConnectable()) {
+//                            try {
+//                                at.channel.finishConnect();
+//                            } catch (IOException e) {
+//                                log("connect failed");
+//                                pendingSet.remove(at);
+//                                at.clear();
+//                                continue;
+//                            }
+//                            key.interestOps(SelectionKey.OP_WRITE);
+//                        } else if (key.isWritable()) {
+//                            //connect success
+//                            pendingSet.remove(at);
+//                            writableSet.add(at);
+//                            key.interestOps(SelectionKey.OP_READ);
+//                        } else if (key.isReadable()) {
+//                            at.readable();
+//                        }
+//                        if (!writableSet.isEmpty() && keySet.size() < Math.random() * TEST_LIMIT) {
+//                            writableSet.get((int) (Math.random() * writableSet.size())).writable();
+//                        }
+//                    }
+//                    keySet.clear();
+//                }
+//            }
+//        }).start();
+//    }
+//
+//    /**
+//     * 测试结果说明：
+//     * pendingSet记录发起但没被响应的连接数，稳定态时应该是0
+//     * idAts记录当前被绑定的id总数
+//     * duplicate记录id重复但没有被断开的连接数，稳定态时应该是0
+//     * pushCount记录总推送数
+//     * recvSuccess记录收到成功推送的数量
+//     * recvWrong记录收到错误推送的数量（A的数据推给了B）
+//     * <p>
+//     * 由于（不可靠）推送机制的设计，（recvSuccess+recvWrong）通常小于pushCount，也就是说有数据丢失。
+//     * 原因是bind操作没有返回成功信息，所以测试程序发起绑定后推送服务器绑定成功前这段时间对这个id的推送数据会丢失（如果有重复id，这段时间的数据可能会推送错目标）
+//     * 实际使用时还要面临意外断线的情况，所以应该保证id不会重复，且对每一个推送在业务层验证送达。
+//     */
+//    private void report() {
+//        new Thread(() -> {
+//            for (; ; ) {
+//                synchronized (PushServer.this) {
+//                    log("pendingSet: " + pendingSet.size());
+//                    log("idAts: " + idAts.size());
+//                    int duplicate = 0;
+//                    for (Stack<TestAttachment> set : idAts.values()) {
+//                        if (set.size() > 1)
+//                            ++duplicate;
+//                    }
+//                    log("duplicate: " + duplicate);
+//
+//                    log("pushCount: " + pushCount);
+//                    log("recvSuccess: " + recvSuccess);
+//                    log("recvWrong: " + recvWrong);
+//                    log("\n");
+//                }
+//                try {
+//                    TimeUnit.SECONDS.sleep(2);
+//                } catch (InterruptedException e) {
+//                    e.printStackTrace();
+//                    return;
+//                }
+//            }
+//        }).start();
+//    }
+//
+//    private class TestAttachment {
+//        int id = 0;
+//        ByteBuffer writeBuffer = ByteBuffer.allocate(MAX_MESSAGE_SIZE);
+//        ByteBuffer readBuffer = ByteBuffer.allocate(MAX_MESSAGE_SIZE);
+//        byte[] buff = new byte[MAX_MESSAGE_SIZE];
+//        SocketChannel channel;
+//        final String msg = String.valueOf(hashCode());
+//
+//        private TestAttachment(SocketChannel channel) {
+//            this.channel = channel;
+//        }
+//
+//        private int bind(int id) {
+//            this.id = id;
+//            writeBuffer.putInt(0, 9);
+//            writeBuffer.put(4, (byte) 1);
+//            writeBuffer.putInt(5, id);
+//            writeBuffer.position(0);
+//            writeBuffer.limit(9);
+//            try {
+//                return channel.write(writeBuffer);
+//            } catch (IOException | NotYetConnectedException e) {
+//                e.printStackTrace();
+//                return -1;
+//            }
+//        }
+//
+//        private void readable() {
+//            try {
+//                String r = read();
+//                if (r == null)
+//                    return;
+//                if (r.equals(msg)) {
+//                    //read success
+//                    ++recvSuccess;
+//                } else {
+//                    //read failed
+//                    ++recvWrong;
+//                }
+//            } catch (IOException e) {
+//                //read failed
+//                clear();
+//            }
+//        }
+//
+//        private void writable() {
+//            if (writableSet.size() > 10 * TEST_LIMIT * Math.random()) {
+//                clear();
+//            } else if (id == 0 && Math.random() * TEST_LIMIT > idAts.size()) {//bind
+//                while (id == 0 || (!DUPLICATE_ID && idAts.containsKey(id))) {
+//                    id = (int) (TEST_LIMIT * Math.random());
+//                }
+//                if (bind(id) != 9) {
+//                    log("send bind failed");
+//                    return;
+//                }
+//                Stack<TestAttachment> stack = idAts.computeIfAbsent(id, k -> new Stack<>());
+//                stack.push(this);
+//            } else {//push
+//                int targetId = 0;
+//                while (targetId == 0 && !writableSet.isEmpty()) {//这里有可能死循环
+//                    targetId = writableSet.get((int) (Math.random() * writableSet.size())).id;
+//                }
+//                byte[] data = idAts.get(targetId).peek().msg.getBytes();
+//                if (singlePush(targetId, data) != data.length + 9) {
+//                    //push failed
+//                    clear();
+//                } else {
+//                    ++pushCount;
+//                }
+//            }
+//        }
+//
+//        private void clear() {
+//            Stack<TestAttachment> stack = idAts.get(id);
+//            if (stack == null || !stack.contains(this)) {
+//                if (id != 0)
+//                    log(" stack == null || !stack.contains(this):  " + id);
+//            } else {
+//                stack.remove(this);
+//                if (stack.isEmpty())
+//                    idAts.remove(id);
+//            }
+//            writableSet.remove(this);
+//            try {
+//                channel.close();
+//            } catch (IOException e1) {
+//                e1.printStackTrace();
+//            }
+//        }
+//
+//        private String read() throws IOException {
+//            if (readBuffer.position() < 4) {
+//                readBuffer.limit(4);
+//                if (channel.read(readBuffer) < 0)
+//                    throw new IOException();
+//                if (readBuffer.position() < 4) {
+//                    //wait more data
+//                    return null;
+//                }
+//            }
+//            int len = readBuffer.getInt(0);
+//            readBuffer.limit(len);
+//            if (readBuffer.hasRemaining()) {
+//                if (channel.read(readBuffer) < 0)
+//                    throw new IOException();
+//                if (readBuffer.hasRemaining()) {
+//                    //wait more data.
+//                    return null;
+//                }
+//            }
+//            readBuffer.position(4);
+//            readBuffer.get(buff, 0, len - 4);
+//            readBuffer.clear();
+//            return new String(buff, 0, len - 4);
+//        }
+//
+//        private int singlePush(int id, byte[] data) {
+//            int len = 9 + data.length;
+//            if (len > MAX_MESSAGE_SIZE)
+//                return -1;
+//            writeBuffer.limit(len);
+//            writeBuffer.position(0);
+//            writeBuffer.putInt(len);
+//            writeBuffer.put((byte) 2);
+//            writeBuffer.putInt(id);
+//            writeBuffer.put(data);
+//            writeBuffer.position(0);
+//            try {
+//                return channel.write(writeBuffer);
+//            } catch (IOException e) {
+//                return -1;
+//            }
+//        }
+//    }
 }
