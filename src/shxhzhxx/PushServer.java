@@ -1,6 +1,7 @@
 package shxhzhxx;
 
 import java.io.IOException;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.StandardSocketOptions;
 import java.nio.ByteBuffer;
@@ -102,7 +103,6 @@ public class PushServer {
                     if (at.byteBuffer.position() < 4) {
                         at.byteBuffer.limit(4);
                         if (!at.read()) {
-                            log("broken pipe");
                             //broken pipe
                             continue;
                         }
@@ -122,7 +122,6 @@ public class PushServer {
                     }
                     at.byteBuffer.limit(len);
                     if (!at.read()) {
-                        log("broken pipe");
                         //broken pipe
                         continue;
                     }
@@ -137,12 +136,12 @@ public class PushServer {
                             at.close();
                             break;
                         case 0://echo
-                            if (len > 5) {
-                                at.byteBuffer.position(5);
-                                if (!at.write(at.byteBuffer)) {
-                                    //broken pipe
-                                    log("broken pipe");
-                                }
+                            at.byteBuffer.putInt(1, len - 1);
+                            at.byteBuffer.position(1);
+                            if (at.write(at.byteBuffer)) {
+                                at.byteBuffer.clear();
+                            } else {
+                                //broken pipe
                             }
                             break;
                         case 1://bind
@@ -181,7 +180,6 @@ public class PushServer {
                                     at.byteBuffer.position(5);
                                     if (!target.write(at.byteBuffer)) {
                                         //broken pipe
-                                        log("broken pipe");
                                     }
                                 }
                                 at.byteBuffer.clear();
@@ -195,28 +193,66 @@ public class PushServer {
                                 at.close();
                             } else {
                                 int num = at.byteBuffer.getInt(5);
-                                if (len < 9 + num * 4) {
+                                int headerLen = 9 + num * 4;
+                                if (len < headerLen) {
                                     log("multi push invalid param, len(%d)<9+num(%d)*4", len, num);
                                     if (at.id > 0)
                                         map.remove(at.id);
                                     at.close();
                                 } else {
-                                    at.byteBuffer.position(5 + 4 * num);
+                                    at.byteBuffer.position(headerLen);
                                     buff.clear();
+                                    buff.putInt(len - headerLen + 4);
                                     buff.put(at.byteBuffer);
-                                    buff.putInt(0, len - 5 - 4 * num);
-                                    buff.limit(len - 5 - 4 * num);
+                                    buff.limit(len - headerLen + 4);
                                     for (int i = 0; i < num; ++i) {
                                         Attachment target = map.get(at.byteBuffer.getInt(9 + 4 * i));
                                         if (target != null) {
                                             buff.position(0);
                                             if (!target.write(buff)) {
                                                 //broken pipe
-                                                log("broken pipe");
                                             }
                                         }
                                     }
                                     at.byteBuffer.clear();
+                                }
+                            }
+                            break;
+                        case 4://get buffer size in bytes
+                            if (len != 5) {
+                                log("get buffer size invalid param, len(%d)!=5", len);
+                                if (at.id > 0)
+                                    map.remove(at.id);
+                                at.close();
+                            } else {
+                                at.byteBuffer.limit(8).position(0);
+                                at.byteBuffer.putInt(8);
+                                at.byteBuffer.putInt(MAX_MESSAGE_SIZE);
+                                at.byteBuffer.position(0);
+                                if (at.write(at.byteBuffer)) {
+                                    at.byteBuffer.clear();
+                                } else {
+                                    //broken pipe
+                                }
+                            }
+                            break;
+                        case 5://get ip
+                            InetAddress inetAddress = at.channel.socket().getInetAddress();
+                            if (len != 5 || inetAddress == null) {
+                                log("get ip invalid param, len(%d)!=5 or inetAddress == null", len);
+                                if (at.id > 0)
+                                    map.remove(at.id);
+                                at.close();
+                            } else {
+                                byte[] address = inetAddress.getHostAddress().getBytes();
+                                at.byteBuffer.limit(address.length + 4).position(0);
+                                at.byteBuffer.putInt(address.length + 4);
+                                at.byteBuffer.put(address);
+                                at.byteBuffer.position(0);
+                                if (at.write(at.byteBuffer)) {
+                                    at.byteBuffer.clear();
+                                } else {
+                                    //broken pipe
                                 }
                             }
                             break;
@@ -281,10 +317,10 @@ public class PushServer {
         System.out.printf(s + "\n", objects);
     }
 
-
     //==============================================================================================================
 //    private final boolean DUPLICATE_ID = false;
 //    private final int TEST_LIMIT = 5000;
+//    private int socketCount=0;
 //    private int pushCount = 0;
 //    private int recvSuccess = 0;
 //    private int recvWrong = 0;
@@ -295,6 +331,7 @@ public class PushServer {
 //
 //    private void test() {
 //        new Thread(() -> {
+//            socketCount = 0;
 //            recvSuccess = 0;
 //            pushCount = 0;
 //            recvWrong = 0;
@@ -366,20 +403,20 @@ public class PushServer {
 //            }
 //        }).start();
 //    }
-//
-//    /**
-//     * 测试结果说明：
-//     * pendingSet记录发起但没被响应的连接数，稳定态时应该是0
-//     * idAts记录当前被绑定的id总数
-//     * duplicate记录id重复但没有被断开的连接数，稳定态时应该是0
-//     * pushCount记录总推送数
-//     * recvSuccess记录收到成功推送的数量
-//     * recvWrong记录收到错误推送的数量（A的数据推给了B）
-//     * <p>
-//     * 由于（不可靠）推送机制的设计，（recvSuccess+recvWrong）通常小于pushCount，也就是说有数据丢失。
-//     * 原因是bind操作没有返回成功信息，所以测试程序发起绑定后推送服务器绑定成功前这段时间对这个id的推送数据会丢失（如果有重复id，这段时间的数据可能会推送错目标）
-//     * 实际使用时还要面临意外断线的情况，所以应该保证id不会重复，且对每一个推送在业务层验证送达。
-//     */
+////
+////    /**
+////     * 测试结果说明：
+////     * pendingSet记录发起但没被响应的连接数，稳定态时应该是0
+////     * idAts记录当前被绑定的id总数
+////     * duplicate记录id重复但没有被断开的连接数，稳定态时应该是0
+////     * pushCount记录总推送数
+////     * recvSuccess记录收到成功推送的数量
+////     * recvWrong记录收到错误推送的数量（A的数据推给了B）
+////     * <p>
+////     * 由于（不可靠）推送机制的设计，（recvSuccess+recvWrong）通常小于pushCount，也就是说有数据丢失。
+////     * 原因是bind操作没有返回成功信息，所以测试程序发起绑定后推送服务器绑定成功前这段时间对这个id的推送数据会丢失（如果有重复id，这段时间的数据可能会推送错目标）
+////     * 实际使用时还要面临意外断线的情况，所以应该保证id不会重复，且对每一个推送在业务层验证送达。
+////     */
 //    private void report() {
 //        new Thread(() -> {
 //            for (; ; ) {
@@ -396,6 +433,7 @@ public class PushServer {
 //                    log("pushCount: " + pushCount);
 //                    log("recvSuccess: " + recvSuccess);
 //                    log("recvWrong: " + recvWrong);
+//                    log("socketCount: " + socketCount);
 //                    log("\n");
 //                }
 //                try {
