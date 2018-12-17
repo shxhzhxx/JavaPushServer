@@ -152,6 +152,7 @@ public class PushClient extends Thread {
                         throw new IOException();
                 }
                 int len = buffer.getInt(0);
+                System.out.println("len:"+len);
                 if (len > size) {
                     throw new IOException();
                 }
